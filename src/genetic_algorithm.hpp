@@ -55,6 +55,13 @@ GAResult runParallel(const ProblemInstance& inst, const GAParams& params);
 Individuo generarIndividuoAleatorio(int n, std::mt19937& rng);
 
 /**
+ * Genera un individuo factible usando heuristica greedy (ratio valor/peso).
+ * Garantiza respetar peso, volumen e incompatibilidades desde el inicio.
+ * Usar para 50% de la poblacion inicial en instancias medianas/grandes.
+ */
+Individuo generarIndividuoGreedy(const ProblemInstance& inst, std::mt19937& rng);
+
+/**
  * Selección por torneo: elige K individuos al azar y retorna el de mayor fitness.
  * @param poblacion  Población actual.
  * @param k          Tamaño del torneo.

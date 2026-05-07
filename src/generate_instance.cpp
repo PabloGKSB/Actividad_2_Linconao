@@ -4,8 +4,19 @@
 //
 // Uso:
 //   ./generate_instance --size 100   --output data/small  --seed 42
-//   ./generate_instance --size 1000  --output data/medium --seed 42
-//   ./generate_instance --size 10000 --output data/large  --seed 42
+//   ./generate_instance --size 1000  --output data/medium --seed 42 --incomp-rate 0.002
+//   ./generate_instance --size 10000 --output data/large  --seed 42 --incomp-rate 0.001
+//
+// Parámetro --incomp-rate:
+//   Fracción de pares de ítems que serán incompatibles.
+//   Default: 0.002 (0.2% → ~2 incompatibilidades por ítem en medium).
+//   El valor original era 0.02 (2% → ~20 por ítem), lo que generaba un
+//   grafo tan denso que ningún AG estocástico podía encontrar soluciones
+//   factibles sin inicialización especializada.
+//   Valores recomendados:
+//     small  (100 ítems)    → 0.02  (valor original, manejable)
+//     medium (1.000 ítems)  → 0.002 (~2 incompatibilidades por ítem)
+//     large  (10.000 ítems) → 0.001 (~2 incompatibilidades por ítem)
 //
 // Genera los archivos:
 //   items.csv, config.csv, category_rules.csv,
@@ -40,17 +51,24 @@ struct Item {
 // Parseo de argumentos
 // ---------------------------------------------------------------------------
 struct GenArgs {
-    int          size   = 100;
-    std::string  output = "data/small";
-    unsigned int seed   = 42;
+    int          size        = 100;
+    std::string  output      = "data/small";
+    unsigned int seed        = 42;
+    double       incomp_rate = 0.002;  // NUEVO: fracción de pares incompatibles
 };
 
 static void printUsage(const std::string& prog) {
-    std::cout << "Uso: " << prog << " --size <N> --output <carpeta> --seed <S>\n\n"
+    std::cout << "Uso: " << prog << " --size <N> --output <carpeta> --seed <S> [--incomp-rate <R>]\n\n"
+              << "Opciones:\n"
+              << "  --size         Número de ítems de la instancia\n"
+              << "  --output       Carpeta de salida\n"
+              << "  --seed         Semilla del generador aleatorio\n"
+              << "  --incomp-rate  Fracción de pares incompatibles (default: 0.002)\n"
+              << "                 Recomendado: 0.002 para medium, 0.001 para large\n\n"
               << "Ejemplos:\n"
               << "  " << prog << " --size 100   --output data/small  --seed 42\n"
-              << "  " << prog << " --size 1000  --output data/medium --seed 42\n"
-              << "  " << prog << " --size 10000 --output data/large  --seed 42\n";
+              << "  " << prog << " --size 1000  --output data/medium --seed 42 --incomp-rate 0.002\n"
+              << "  " << prog << " --size 10000 --output data/large  --seed 42 --incomp-rate 0.001\n";
 }
 
 static GenArgs parseArgs(int argc, char* argv[]) {
@@ -66,9 +84,10 @@ static GenArgs parseArgs(int argc, char* argv[]) {
                 throw std::runtime_error("Falta valor para: " + flag);
             return std::string(argv[++i]);
         };
-        if      (flag == "--size")   args.size   = std::stoi(next());
-        else if (flag == "--output") args.output = next();
-        else if (flag == "--seed")   args.seed   = static_cast<unsigned>(std::stoi(next()));
+        if      (flag == "--size")        args.size        = std::stoi(next());
+        else if (flag == "--output")      args.output      = next();
+        else if (flag == "--seed")        args.seed        = static_cast<unsigned>(std::stoi(next()));
+        else if (flag == "--incomp-rate") args.incomp_rate = std::stod(next());  // NUEVO
         else std::cerr << "[WARNING] Argumento ignorado: " << flag << "\n";
     }
     return args;
@@ -129,7 +148,6 @@ int main(int argc, char* argv[]) {
     // ------------------------------------------------------------------
     long long W = static_cast<long long>(0.40 * total_peso);
     long long V = static_cast<long long>(0.40 * total_vol);
-    // Garantizar mínimo de 1
     if (W < 1) W = 1;
     if (V < 1) V = 1;
 
@@ -152,15 +170,22 @@ int main(int argc, char* argv[]) {
     }
 
     // ------------------------------------------------------------------
-    // 4. Generar incompatibilidades (~2% de pares únicos)
-    //    Usar un set de pares ordenados para evitar duplicados.
+    // 4. Generar incompatibilidades (fracción configurable via --incomp-rate)
+    //
+    //    Justificación del cambio respecto al valor original (0.02):
+    //    Con n=1.000, el 2% genera ~9.990 pares → ~20 incompatibilidades
+    //    por ítem en promedio. Con selección aleatoria del 40% de ítems,
+    //    se esperan ~1.600 violaciones simultáneas. Con DELTA=1000, la
+    //    penalización acumulada (-1.6M) supera en órdenes de magnitud al
+    //    valor total obtenible (~200K), creando un pozo del que el AG no
+    //    puede escapar. Reducir a 0.2% genera ~2 incompatibilidades por
+    //    ítem, manteniendo el problema no trivial pero alcanzable.
     // ------------------------------------------------------------------
     {
-        // Calcular cuántos pares totales posibles hay
         long long pares_totales = static_cast<long long>(n) * (n - 1) / 2;
-        int n_incomp = static_cast<int>(std::ceil(0.02 * pares_totales));
+        int n_incomp = static_cast<int>(std::ceil(args.incomp_rate * pares_totales));
         // Limitar para no tardar demasiado con instancias grandes
-        n_incomp = std::min(n_incomp, 50000);
+        n_incomp = std::min(n_incomp, 10000);
 
         std::uniform_int_distribution<int> dist_item(0, n - 1);
         std::set<std::pair<int,int>> incomp_set;
@@ -179,11 +204,11 @@ int main(int argc, char* argv[]) {
         std::ofstream f(args.output + "/incompatibilities.csv");
         f << "id_item_a,id_item_b\n";
         for (const auto& [a, b] : incomp_set) {
-            // Escribir IDs 1-based
             f << (a + 1) << "," << (b + 1) << "\n";
         }
 
-        std::cout << "[INFO] Incompatibilidades generadas: " << incomp_set.size() << "\n";
+        std::cout << "[INFO] Incompatibilidades generadas: " << incomp_set.size()
+                  << " (" << (2.0 * incomp_set.size() / n) << " por item en promedio)\n";
     }
 
     // ------------------------------------------------------------------
@@ -193,7 +218,7 @@ int main(int argc, char* argv[]) {
     {
         int n_deps = std::max(1, static_cast<int>(0.01 * n));
         std::uniform_int_distribution<int> dist_item(0, n - 1);
-        std::set<int> deps_src; // Ítems que ya tienen dependencia (para unicidad del par)
+        std::set<int> deps_src;
         std::vector<std::pair<int,int>> deps;
 
         int intentos = 0;
@@ -219,11 +244,12 @@ int main(int argc, char* argv[]) {
     // Resumen
     // ------------------------------------------------------------------
     std::cout << "=== Instancia generada ===\n"
-              << "  Tamaño:  " << n << " ítems\n"
-              << "  Carpeta: " << args.output << "\n"
+              << "  Tamaño:       " << n << " ítems\n"
+              << "  Carpeta:      " << args.output << "\n"
               << "  W = " << W << "  (40% de " << total_peso << ")\n"
               << "  V = " << V << "  (40% de " << total_vol  << ")\n"
-              << "  Semilla: " << args.seed << "\n";
+              << "  Semilla:      " << args.seed << "\n"
+              << "  incomp-rate:  " << args.incomp_rate << "\n";
 
     return 0;
 }

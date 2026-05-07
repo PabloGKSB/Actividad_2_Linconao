@@ -3,26 +3,89 @@
 // Implementación del algoritmo genético secuencial (Variante 1) y paralelo
 // con OpenMP (Variante 2) para el problema de la mochila extendida.
 //
-// Variante 2 – Zonas paralelizadas y justificación:
+// ── Inicialización híbrida (50% greedy + 50% aleatoria) ─────────────────────
 //
-//  A) Evaluación de fitness (#pragma omp parallel for schedule(dynamic))
-//     - Cada evaluación es INDEPENDIENTE: fitness(X_i) no depende de X_j.
-//     - Variables privadas: índice i, cálculos intermedios de calcularFitness.
-//     - Variables compartidas (solo lectura): pool[], inst (const).
-//     - Sin race condition garantizado porque cada hilo escribe en pool[i] distinto.
-//     - schedule(dynamic) equilibra carga si los cromosomas tienen distinto costo.
+//   La población inicial mezcla individuos generados por heurística greedy
+//   (generarIndividuoGreedy) con individuos aleatorios (generarIndividuoAleatorio).
+//   Esto es necesario porque en instancias con muchas incompatibilidades, la
+//   inicialización 100% aleatoria produce cromosomas con cientos de violaciones
+//   y fitness muy negativos (-1.5M en medium), creando un pozo de penalización
+//   del que el AG estocástico no puede escapar. La mitad greedy garantiza la
+//   presencia de soluciones factibles desde la generación 0.
 //
-//  B) Generación de hijos (#pragma omp parallel for schedule(static))
-//     - Cada pareja (2k, 2k+1) produce sus hijos de forma independiente.
-//     - Cada hilo usa su PROPIO mt19937 (semilla = seed + thread_id) para evitar
-//       data races en el generador aleatorio.
-//     - Cada hilo escribe en índices distintos del vector hijos[].
-//     - schedule(static) es adecuado porque el costo es homogéneo.
+// ── Variante 2 — Análisis completo de paralelismo ───────────────────────────
 //
-//  C) Selección por torneo (cada torneo es independiente)
-//     - Cada torneo lee la población (solo lectura) y escribe en padres[i] propio.
-//     - Variables privadas: índice i, rng_local, índices de candidatos.
-//     - Sin escritura compartida: padres[i] solo lo escribe el hilo i.
+//  ZONA A: Evaluación de fitness (#pragma omp parallel for schedule(dynamic))
+//
+//    Por qué es paralelizable:
+//      fitness(X_i) depende únicamente del cromosoma i y de inst (const).
+//      No hay dependencia de datos entre individuos: fitness(X_i) no lee
+//      ni modifica fitness(X_j) para ningún j ≠ i.
+//
+//    Variables PRIVADAS (cada hilo tiene su copia):
+//      - i              : índice de inducción del bucle.
+//      - Todos los cálculos intermedios dentro de calcularFitness (peso_total,
+//        vol_total, excesos, contadores de violaciones, etc.).
+//
+//    Variables COMPARTIDAS:
+//      - pool[]         : compartido en LECTURA (pool[i].cromosoma) y ESCRITURA
+//                         acotada (pool[i].fitness, pool[i].es_factible).
+//                         Sin race condition: hilo i solo escribe en pool[i].
+//      - inst           : solo lectura (const ProblemInstance&). Múltiples hilos
+//                         pueden leerla simultáneamente sin sincronización.
+//
+//    schedule(dynamic): distribuye iteraciones dinámicamente. Útil porque el
+//      costo de calcularFitness varía según cuántas restricciones activa cada
+//      cromosoma (más ítems seleccionados → más incompatibilidades a revisar).
+//
+//  ZONA B: Generación de hijos — cruzamiento + mutación
+//          (#pragma omp parallel for schedule(static))
+//
+//    Por qué es paralelizable:
+//      Cada pareja p = (2p, 2p+1) produce hijos independientes de las demás
+//      parejas. No hay dependencia de datos entre parejas distintas.
+//
+//    Variables PRIVADAS:
+//      - p              : índice de pareja.
+//      - tid            : ID del hilo (omp_get_thread_num()).
+//      - rng_local      : referencia al mt19937 del hilo (rngs[tid]).
+//                         CLAVE: cada hilo tiene su propio generador con semilla
+//                         seed + thread_id. Si todos usaran el mismo RNG,
+//                         habría race condition en la actualización del estado
+//                         interno del generador (Marsaglia, 2003).
+//      - padre1, padre2 : referencias const a poblacion[] (solo lectura).
+//      - h1, h2         : objetos Individuo locales al hilo.
+//      - prob           : distribución local al hilo.
+//
+//    Variables COMPARTIDAS:
+//      - poblacion[]    : solo lectura durante selección. Ningún hilo la modifica
+//                         en esta fase → sin race condition.
+//      - hijos[]        : compartido en ESCRITURA acotada. Hilo p solo escribe
+//                         en hijos[2*p] y hijos[2*p+1]. Como 2*p y 2*p+1 son
+//                         únicos para cada p, no hay escritura cruzada.
+//
+//    schedule(static): distribución estática porque el costo por pareja es
+//      homogéneo (cruzamiento un punto + mutación tienen costo O(n) fijo).
+//
+//  ZONA C: Selección por torneo (ejecutada dentro de ZONA B)
+//
+//    Por qué es paralelizable:
+//      Cada torneo es una lectura independiente de poblacion[] con k accesos
+//      aleatorios. No hay escritura en poblacion[] durante esta fase.
+//
+//    Variables PRIVADAS:
+//      - rng_local      : privado al hilo (ver ZONA B). Resuelve el data race
+//                         en el generador aleatorio que tendría un RNG compartido.
+//      - mejor_idx, idx : índices locales al torneo.
+//
+//    Variables COMPARTIDAS:
+//      - poblacion[]    : solo lectura → sin race condition.
+//
+//  Race conditions eliminadas:
+//    1. RNG compartido     → RESUELTA con rngs[thread_id].
+//    2. Escritura en hijos → RESUELTA con índices exclusivos 2*p, 2*p+1.
+//    3. Lectura de padres  → NO HAY (poblacion[] es solo lectura en ZONA B/C).
+//    4. Evaluación fitness → RESUELTA porque pool[i] solo lo escribe hilo i.
 // =============================================================================
 #include "genetic_algorithm.hpp"
 #include <algorithm>
@@ -44,6 +107,86 @@ Individuo generarIndividuoAleatorio(int n, std::mt19937& rng) {
     ind.fitness      = 0.0;
     ind.es_factible  = false;
     ind.valor_total  = 0;
+    return ind;
+}
+
+// ---------------------------------------------------------------------------
+// generarIndividuoGreedy
+// Construye un individuo factible mediante heurística greedy:
+//   - Ordena ítems por valor/peso descendente (con shuffle parcial para diversidad).
+//   - Agrega ítems respetando peso, volumen e incompatibilidades.
+// Esto garantiza que la población inicial contenga individuos factibles,
+// lo que acelera enormemente la convergencia cuando hay muchas incompatibilidades.
+// ---------------------------------------------------------------------------
+Individuo generarIndividuoGreedy(const ProblemInstance& inst, std::mt19937& rng) {
+    const int n = static_cast<int>(inst.items.size());
+
+    // Ordenar por ratio valor/peso con perturbación aleatoria para diversidad
+    std::vector<int> orden(n);
+    std::iota(orden.begin(), orden.end(), 0);
+    // Añadir ruido: shuffle de bloques del 20% para diversidad entre individuos
+    int bloque = std::max(1, n / 5);
+    for (int b = 0; b < n; b += bloque) {
+        int fin = std::min(b + bloque, n);
+        std::shuffle(orden.begin() + b, orden.begin() + fin, rng);
+    }
+    // Ordenar bloques por valor/peso
+    std::sort(orden.begin(), orden.end(), [&](int a, int b_idx) {
+        double ra = (double)inst.items[a].valor / std::max(1, inst.items[a].peso);
+        double rb = (double)inst.items[b_idx].valor / std::max(1, inst.items[b_idx].peso);
+        return ra > rb;
+    });
+
+    // Construir solución greedy
+    Individuo ind;
+    ind.cromosoma.assign(n, 0);
+    ind.fitness = 0.0; ind.es_factible = false; ind.valor_total = 0;
+
+    // Índice de incompatibilidades para lookup O(1)
+    std::vector<std::vector<int>> adj(n);
+    for (const auto& [a, b] : inst.incompatibilities) {
+        adj[a].push_back(b);
+        adj[b].push_back(a);
+    }
+
+    long long peso_usado = 0;
+    long long vol_usado  = 0;
+
+    for (int i : orden) {
+        const auto& item = inst.items[i];
+        if (peso_usado + item.peso > inst.W) continue;
+        if (vol_usado  + item.volumen > inst.V) continue;
+        // Verificar incompatibilidades
+        bool incompatible = false;
+        for (int j : adj[i]) {
+            if (ind.cromosoma[j] == 1) { incompatible = true; break; }
+        }
+        if (incompatible) continue;
+        // Verificar dependencias: si i requiere j, asegurar que j también se incluya.
+        // Si j no puede incluirse (peso/vol/incomp), no incluimos i.
+        bool dep_ok = true;
+        for (const auto& [dep_item, dep_req] : inst.dependencies) {
+            if (dep_item == i && ind.cromosoma[dep_req] == 0) {
+                // Intentar agregar el requerido primero
+                const auto& req = inst.items[dep_req];
+                bool req_incomp = false;
+                for (int jj : adj[dep_req]) {
+                    if (ind.cromosoma[jj] == 1) { req_incomp = true; break; }
+                }
+                if (!req_incomp && peso_usado + req.peso <= inst.W && vol_usado + req.volumen <= inst.V) {
+                    ind.cromosoma[dep_req] = 1;
+                    peso_usado += req.peso;
+                    vol_usado  += req.volumen;
+                } else {
+                    dep_ok = false; break;
+                }
+            }
+        }
+        if (!dep_ok) continue;
+        ind.cromosoma[i] = 1;
+        peso_usado += item.peso;
+        vol_usado  += item.volumen;
+    }
     return ind;
 }
 
@@ -142,12 +285,20 @@ GAResult runSequential(const ProblemInstance& inst, const GAParams& params) {
     std::mt19937 rng(params.seed);
 
     // ------------------------------------------------------------------
-    // Inicializar población
+    // Inicializar población (50% greedy + 50% aleatoria)
+    // La mitad greedy garantiza individuos factibles desde la gen 0,
+    // lo que es critico con muchas incompatibilidades (medium/large).
+    // La mitad aleatoria mantiene diversidad genetica.
     // ------------------------------------------------------------------
     std::vector<Individuo> poblacion(params.pop_size);
-    for (auto& ind : poblacion) {
-        ind = generarIndividuoAleatorio(n, rng);
-        calcularFitness(ind, inst);
+    {
+        int n_greedy = params.pop_size / 2;
+        for (int i = 0; i < params.pop_size; ++i) {
+            poblacion[i] = (i < n_greedy)
+                ? generarIndividuoGreedy(inst, rng)
+                : generarIndividuoAleatorio(n, rng);
+            calcularFitness(poblacion[i], inst);
+        }
     }
 
     // Historial del mejor factible para la solución final
@@ -280,11 +431,16 @@ GAResult runParallel(const ProblemInstance& inst, const GAParams& params) {
     std::mt19937 rng_master(params.seed);
 
     // ------------------------------------------------------------------
-    // Inicializar población (secuencial; costo mínimo comparado con el AG)
+    // Inicializar población (50% greedy + 50% aleatoria, secuencial)
     // ------------------------------------------------------------------
     std::vector<Individuo> poblacion(params.pop_size);
-    for (auto& ind : poblacion) {
-        ind = generarIndividuoAleatorio(n, rng_master);
+    {
+        int n_greedy = params.pop_size / 2;
+        for (int i = 0; i < params.pop_size; ++i) {
+            poblacion[i] = (i < n_greedy)
+                ? generarIndividuoGreedy(inst, rng_master)
+                : generarIndividuoAleatorio(n, rng_master);
+        }
     }
 
     // ---- Evaluación inicial de fitness (paralelo) ----

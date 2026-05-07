@@ -1,0 +1,35 @@
+# Binarios compilados
+mochila_ga
+mochila_ga.exe
+generate_instance
+generate_instance.exe
+
+# Objetos intermedios
+*.o
+*.obj
+
+# Archivos de compilación temporales
+compile_out.txt
+compile_err.txt
+
+# Resultados experimentales (generados en ejecución)
+results/resultados.csv
+
+# Carpetas de instancias generadas (se regeneran con generate_instance)
+# Comenta estas líneas si quieres versionar las instancias
+# data/small/
+# data/medium/
+# data/large/
+
+# IDEs y editores
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docinfo
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
