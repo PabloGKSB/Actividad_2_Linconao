@@ -7,7 +7,7 @@ el **Problema de la Mochila Extendida con múltiples restricciones**:
 
 | Variante | Descripción |
 |----------|-------------|
-| `sequential` | AG clásico sin paralelismo |
+| `sequential` | AG clásico sin paralelismo (línea base) |
 | `parallel`   | AG con paralelismo OpenMP (fitness, cruzamiento, selección) |
 | `islands`    | Modelo de Islas con topología en anillo y migración periódica |
 
@@ -23,7 +23,9 @@ incompatibilidades y dependencias entre ítems.
   - Linux/macOS: GCC ≥ 7, Clang ≥ 7
   - Windows: MinGW-w64 con `-fopenmp` o MSYS2
 - **Sistema de archivos**: soporte para `std::filesystem` (C++17)
-- **Bash**: para ejecutar `scripts/run_experiments.sh` (Linux/macOS/WSL)
+- **Scripts de experimentos**:
+  - Linux/macOS/WSL: `scripts/run_experiments.sh`
+  - Windows: `scripts/run_experiments.ps1` (PowerShell)
 
 ---
 
@@ -33,12 +35,12 @@ incompatibilidades y dependencias entre ítems.
 actividad_mochila_paralela/
 ├── src/
 │   ├── main.cpp                # Punto de entrada y CLI
-│   ├── generate_instance.cpp   # Generador de instancias
-│   ├── genetic_algorithm.cpp   # Variantes 1 y 2
+│   ├── generate_instance.cpp   # Generador de instancias (soporta --incomp-rate)
+│   ├── genetic_algorithm.cpp   # Variantes 1 y 2 (inicialización híbrida greedy)
 │   ├── genetic_algorithm.hpp
-│   ├── fitness.cpp             # Función de aptitud
+│   ├── fitness.cpp             # Función de aptitud con penalizaciones
 │   ├── fitness.hpp
-│   ├── island_model.cpp        # Variante 3
+│   ├── island_model.cpp        # Variante 3 — Modelo de islas
 │   ├── island_model.hpp
 │   ├── instance_loader.cpp     # Carga de CSV
 │   └── instance_loader.hpp
@@ -49,7 +51,8 @@ actividad_mochila_paralela/
 ├── results/
 │   └── resultados.csv          # Resultados de experimentos
 ├── scripts/
-│   └── run_experiments.sh
+│   ├── run_experiments.sh      # Experimentos completos (Linux/macOS/WSL)
+│   └── run_experiments.ps1     # Experimentos completos (Windows PowerShell)
 └── README.md
 ```
 
@@ -58,7 +61,7 @@ actividad_mochila_paralela/
 ## Compilación
 
 ```bash
-# Compilar el programa principal (mochila_ga)
+# Compilar el programa principal
 g++ -O2 -fopenmp -std=c++17 \
     src/instance_loader.cpp \
     src/fitness.cpp \
@@ -67,14 +70,13 @@ g++ -O2 -fopenmp -std=c++17 \
     src/main.cpp \
     -o mochila_ga
 
-# Compilar el generador de instancias (generate_instance)
+# Compilar el generador de instancias
 g++ -O2 -std=c++17 src/generate_instance.cpp -o generate_instance
 ```
 
 > **Requisito**: GCC 8+ con OpenMP. Recomendado **MSYS2 MinGW-w64 ucrt64** (GCC 15.x).
 
-> **Windows — si `g++` en PATH apunta a MinGW antiguo**: usar la ruta completa o
-> agregar `C:\msys64\ucrt64\bin` al **inicio** del PATH del sistema:
+> **Windows — si `g++` en PATH apunta a MinGW antiguo**:
 > ```bash
 > C:/msys64/ucrt64/bin/g++ -O2 -fopenmp -std=c++17 \
 >     src/instance_loader.cpp src/fitness.cpp \
@@ -84,20 +86,37 @@ g++ -O2 -std=c++17 src/generate_instance.cpp -o generate_instance
 
 > También se puede compilar con el `Makefile`:
 > ```bash
-> make                                         # usa g++ en PATH
-> make CXX=C:/msys64/ucrt64/bin/g++           # fuerza GCC 15 de MSYS2
+> make
+> make CXX=C:/msys64/ucrt64/bin/g++   # fuerza GCC 15 de MSYS2
 > ```
-
 
 ---
 
 ## Generar Instancias
 
 ```bash
+# Instancia small: se usa tasa original (0.02) — 100 ítems la manejan bien
 ./generate_instance --size 100   --output data/small  --seed 42
-./generate_instance --size 1000  --output data/medium --seed 42
-./generate_instance --size 10000 --output data/large  --seed 42
+
+# Instancia medium: tasa reducida a 0.002 (~2 incompatibilidades por ítem)
+./generate_instance --size 1000  --output data/medium --seed 42 --incomp-rate 0.002
+
+# Instancia large: tasa reducida a 0.001 (~2 incompatibilidades por ítem)
+./generate_instance --size 10000 --output data/large  --seed 42 --incomp-rate 0.001
 ```
+
+### ¿Por qué se redujo la tasa de incompatibilidades?
+
+La tasa original (`0.02`, 2% de pares) generaba ~20 incompatibilidades por ítem
+en medium. Con selección aleatoria del 40% de ítems se esperan ~1.600 violaciones
+simultáneas y una penalización de −1,5M, creando un pozo del que el AG estocástico
+no puede escapar. La tasa reducida mantiene el problema no trivial pero alcanzable.
+
+| Instancia | `--incomp-rate` | Incompatib. generadas | Por ítem (aprox.) |
+|-----------|-----------------|----------------------|-------------------|
+| small     | 0.02 (default)  | ~20                  | ~0.4              |
+| medium    | 0.002           | ~999                 | ~2                |
+| large     | 0.001           | ~10.000              | ~2                |
 
 Cada instancia genera 5 archivos CSV en la carpeta indicada:
 
@@ -137,13 +156,26 @@ Cada instancia genera 5 archivos CSV en la carpeta indicada:
 
 ## Correr los Experimentos Completos
 
+### Linux / macOS / WSL
+
 ```bash
 chmod +x scripts/run_experiments.sh
 bash scripts/run_experiments.sh
 ```
 
-Ejecuta **540 combinaciones**:
-- 3 variantes × 3 instancias × 4 configuraciones de hilos (1,2,4,8) × 15 semillas
+### Windows (PowerShell)
+
+```powershell
+# Si da error de política de ejecución:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+.\scripts\run_experiments.ps1
+```
+
+Ambos scripts ejecutan **540 combinaciones**:
+- 3 variantes × 3 instancias × 4 configuraciones de hilos (1, 2, 4, 8) × 15 semillas
+
+Los resultados se guardan en `results/resultados.csv`.
 
 ---
 
@@ -162,8 +194,8 @@ islands,small,4,1,95.3,8800,8800.0,true,500
 | `instancia` | Nombre de la carpeta (`small`, `medium`, `large`) |
 | `hilos` | Número de hilos OpenMP utilizados |
 | `semilla` | Semilla del RNG para reproducibilidad |
-| `tiempo_ms` | Tiempo de ejecución del AG en milisegundos (sin I/O) |
-| `mejor_valor` | Suma de valores de ítems seleccionados |
+| `tiempo_ms` | Tiempo de ejecución del AG en ms (sin I/O) |
+| `mejor_valor` | Suma de valores de los ítems seleccionados |
 | `mejor_fitness` | Valor de la función de aptitud del mejor individuo |
 | `es_factible` | `true` si cumple todas las restricciones duras |
 | `generaciones_usadas` | Generaciones ejecutadas hasta criterio de parada |
@@ -176,12 +208,13 @@ islands,small,4,1,95.3,8800,8800.0,true,500
 
 AG clásico con los siguientes operadores:
 
-1. **Inicialización**: cromosomas binarios aleatorios con `std::mt19937`
+1. **Inicialización híbrida**: 50% individuos greedy (ratio valor/peso) + 50% aleatorios
 2. **Evaluación**: función de penalización con 5 términos
 3. **Selección**: torneo de tamaño K=5
 4. **Cruzamiento**: un punto de corte, probabilidad 0.85
 5. **Mutación**: bit flip por posición, probabilidad 0.02
 6. **Elitismo**: pool = padres + hijos (400), se conservan los 200 mejores
+7. **Parada anticipada**: si el mejor fitness no mejora en 100 generaciones consecutivas
 
 ### Variante 2 — Paralelo con OpenMP (`parallel`)
 
@@ -213,7 +246,7 @@ for (int p = 0; p < n_parejas; ++p) {
 ```
 - **Por qué es paralelizable**: cada pareja produce hijos sin compartir estado.
 - **Race condition en RNG evitada**: cada hilo tiene su propio `mt19937` con semilla `= seed + thread_id`.
-- **Sin race condition en escritura**: cada hilo escribe en `hijos[2*p]` y `hijos[2*p+1]`, índices exclusivos.
+- **Sin race condition en escritura**: cada hilo escribe en índices `2*p` y `2*p+1` exclusivos.
 
 #### C) Selección por torneo
 - Ejecutada dentro de la zona paralela B.
@@ -223,16 +256,16 @@ for (int p = 0; p < n_parejas; ++p) {
 ### Variante 3 — Modelo de Islas (`islands`)
 
 ```
-N_ISLAS = 4  (configurable vía --threads)
-POP_POR_ISLA = 50
-FRECUENCIA_MIGRACIÓN = 25 generaciones
-N_MIGRANTES = 2
-TOPOLOGÍA = anillo
+N_ISLAS           = n_hilos  (1 isla por hilo OpenMP)
+POP_POR_ISLA      = max(20, pop_size / n_islas)
+FREC_MIGRACIÓN    = 25 generaciones
+N_MIGRANTES       = 2  (los 2 mejores de cada isla)
+TOPOLOGÍA         = anillo  (isla i → isla i+1 mod N_ISLAS)
 ```
 
 - Cada isla evoluciona de forma **completamente independiente** entre migraciones.
-- Las islas se ejecutan en paralelo con `#pragma omp parallel for`.
-- La migración usa `#pragma omp critical` para proteger el acceso cruzado entre islas.
+- Las islas corren en paralelo con `#pragma omp parallel for schedule(static)`.
+- La migración usa `#pragma omp critical` para proteger el acceso cruzado.
 - Cada isla tiene su propio `mt19937` con semilla `= base_seed + isla_id`.
 
 ```
@@ -240,6 +273,27 @@ Anillo de migración:
   Isla 0 → Isla 1 → Isla 2 → Isla 3 → Isla 0
   (los 2 mejores de isla i reemplazan a los 2 peores de isla i+1)
 ```
+
+**Nota experimental**: el modelo de islas es más rápido que sequential en instancias
+pequeñas (small: ~2–3×), pero no supera al AG paralelo directo en instancias medianas
+y grandes cuando se usa inicialización híbrida, ya que las subpoblaciones de 50
+individuos tienen menor diversidad que el AG base de 200 y el criterio de parada
+anticipada no se activa (las islas ejecutan las 500 generaciones completas).
+
+---
+
+## Inicialización Híbrida (greedy + aleatoria)
+
+La población inicial se divide en dos mitades iguales:
+
+- **50% greedy**: ítems ordenados por ratio `valor/peso` descendente (con perturbación
+  aleatoria por bloques para diversidad entre individuos). Se incluye cada ítem si no
+  viola peso, volumen, incompatibilidades ni dependencias. Garantiza individuos factibles
+  desde la generación 0.
+- **50% aleatoria**: cromosoma binario uniforme `Bernoulli(0.5)`. Aporta diversidad genética.
+
+Esta estrategia es fundamental para instancias con muchas incompatibilidades, donde la
+inicialización 100% aleatoria produce penalizaciones tan altas que el AG no puede converger.
 
 ---
 
@@ -250,15 +304,13 @@ Anillo de migración:
 | Parámetro | Valor | Justificación |
 |-----------|-------|---------------|
 | `POP_SIZE` | 200 | Balance diversidad/convergencia para instancias de hasta 10K ítems |
-| `MAX_GEN` | 500 | Suficiente para convergencia observada experimentalmente |
-| `PROB_CRUZAMIENTO` | 0.85 | Valor clásico de la literatura (Holland, 1975); favorece exploración |
-| `PROB_MUTACION` | 0.02 | 1/n típico para n=50; previene convergencia prematura |
-| `TORNEO_K` | 5 | Presión selectiva moderada; evita pérdida de diversidad |
+| `MAX_GEN` | 500 | Con parada anticipada a los 100 sin mejora |
+| `PROB_CRUZAMIENTO` | 0.85 | Valor clásico de la literatura (Holland, 1975) |
+| `PROB_MUTACION` | 0.02 | ~1/50 bits; previene convergencia prematura |
+| `TORNEO_K` | 5 | Presión selectiva moderada (Goldberg & Deb, 1991) |
 | `SIN_MEJORA_MAX` | 100 | Criterio de parada por estancamiento |
 
 ### Penalizaciones de la función de aptitud
-
-La función de aptitud es:
 
 ```
 fitness(X) = valor_total(X)
@@ -269,24 +321,19 @@ fitness(X) = valor_total(X)
            - ε × dependencias_incumplidas(X)
 ```
 
-| Parámetro | Valor | Justificación |
-|-----------|-------|---------------|
-| `α` (peso) | 10.0 | Un kg de exceso "vale" 10 unidades de valor → cualquier ítem con valor < 10 no compensa exceder el peso |
-| `β` (volumen) | 10.0 | Misma lógica que α; peso y volumen tienen igual importancia |
-| `γ` (categoría) | 500.0 | Penalización moderada; restricción blanda → el AG la mejora gradualmente sin bloquear la búsqueda |
-| `δ` (incompatibilidad) | 1000.0 | Restricción dura → penalización alta garantiza que casi nunca sea óptimo violarla |
-| `ε` (dependencia) | 1000.0 | Igual que δ; dependencia es restricción dura |
-
-> **Nota**: Los valores α=β=10 están calibrados para que el costo de exceder
-> capacidad siempre supere el beneficio esperado de un ítem marginal (valor
-> promedio ≈ 505; exceso típico ≥ 50 unidades → penalización = 500 >> valor).
+| Coef. | Valor | Tipo | Justificación |
+|-------|-------|------|---------------|
+| `α` | 10 | Blanda | Un kg de exceso penaliza 10 unidades; restricción gradual |
+| `β` | 10 | Blanda | Igual que α; peso y volumen tienen la misma importancia |
+| `γ` | 500 | Blanda | Penalización moderada; el AG la mejora gradualmente |
+| `δ` | 1000 | Dura | Alta penalización; casi nunca es óptimo violar incompatibilidades |
+| `ε` | 1000 | Dura | Igual que δ; dependencia es restricción dura equivalente |
 
 ---
 
 ## Medición de Tiempos
 
-El tiempo se mide **exclusivamente** sobre el algoritmo genético, sin incluir la
-lectura de archivos CSV:
+El tiempo se mide **exclusivamente** sobre el AG, sin incluir lectura de CSVs:
 
 ```cpp
 double inicio = omp_get_wtime();
@@ -303,15 +350,17 @@ independiente del número de hilos.
 ## Reproducibilidad
 
 Cada ejecución acepta una semilla que inicializa `std::mt19937`:
-- **Variante 1 y 2**: semilla única para el hilo maestro; hilos adicionales usan `seed + thread_id`.
-- **Variante 3**: cada isla usa `seed + isla_id`.
 
-Esto garantiza que los resultados sean **reproducibles** con la misma semilla y
-número de hilos.
+- **Variante 1**: semilla única para el RNG principal.
+- **Variante 2**: hilo maestro usa `seed`; hilos adicionales usan `seed + thread_id`.
+- **Variante 3**: isla `i` usa `seed + i`.
+
+Esto garantiza resultados **reproducibles** con la misma semilla y número de hilos,
+en cualquier equipo con el mismo compilador.
 
 ---
 
 ## Autores
 
 Actividad 2 — Computación Paralela  
-Universidad / Institución
+Universidad Católica de Temuco — INFO1194
